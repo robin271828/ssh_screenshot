@@ -1,0 +1,49 @@
+#!/bin/bash
+# macOS: select a screen area, upload it to ~/screenshots on each ssh host given and copy the
+# remote path to the clipboard, to paste into Claude Code (or anything else) running there.
+# With several hosts, the clipboard gets the first one's path.
+#
+# Usage: ssh-screenshot host [host ...]
+
+case "${1:-}" in
+    ""|-h|--help) echo "Usage: $(basename "$0") host [host ...]" >&2; exit 1 ;;
+esac
+
+f="shot-$(date +%Y%m%d-%H%M%S).png"
+dir="$(mktemp -d)"
+tmp="$dir/$f"
+
+screencapture -i "$tmp"
+[ -f "$tmp" ] || { rm -rf "$dir"; exit 0; }  # Esc pressed
+
+# All hosts at once and never prompting, so one that is down fails within seconds instead
+# of holding up the others. The remote shell expands ~ and echoes the absolute path back.
+i=0
+for host in "$@"; do
+    i=$((i + 1))
+    ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
+        "mkdir -p ~/screenshots && cat > ~/screenshots/$f && echo ~/screenshots/$f" \
+        < "$tmp" > "$dir/$i.path" 2>/dev/null &
+done
+wait
+
+sent="" failed="" dest="" i=0
+for host in "$@"; do
+    i=$((i + 1))
+    if [ -s "$dir/$i.path" ]; then
+        sent="$sent $host"
+        [ -n "$dest" ] || dest="$(cat "$dir/$i.path")"
+    else
+        failed="$failed $host"
+    fi
+done
+
+if [ -n "$dest" ]; then
+    printf '%s' "$dest" | pbcopy
+    message="$f"
+    [ -z "$failed" ] || message="$f, not to${failed}"
+    osascript -e "display notification \"$message\" with title \"Sent to${sent}\""
+else
+    osascript -e "display notification \"Upload to${failed} failed\" with title \"ssh-screenshot\""
+fi
+rm -rf "$dir"
